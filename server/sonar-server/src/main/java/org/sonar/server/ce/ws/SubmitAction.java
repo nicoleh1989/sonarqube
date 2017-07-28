@@ -38,6 +38,7 @@ public class SubmitAction implements CeWsAction {
   private static final String PARAM_PROJECT_BRANCH = "projectBranch";
   private static final String PARAM_PROJECT_NAME = "projectName";
   private static final String PARAM_REPORT_DATA = "report";
+  private static final String PARAM_ANALYSIS_CHARACTERISTIC = "characteristic";
 
   private final ReportSubmitter reportSubmitter;
   private final DefaultOrganizationProvider defaultOrganizationProvider;
@@ -85,6 +86,13 @@ public class SubmitAction implements CeWsAction {
       .createParam(PARAM_REPORT_DATA)
       .setRequired(true)
       .setDescription("Report file. Format is not an API, it changes among SonarQube versions.");
+
+    action
+      .createParam(PARAM_ANALYSIS_CHARACTERISTIC)
+      .setRequired(false)
+      .setDescription("Optional characteristic of the analysis. Can be repeated to define multiple characteristics.")
+      .setExampleValue("incremental=true")
+      .setSince("6.6");
   }
 
   @Override
@@ -95,6 +103,7 @@ public class SubmitAction implements CeWsAction {
     String projectKey = wsRequest.mandatoryParam(PARAM_PROJECT_KEY);
     String projectBranch = wsRequest.param(PARAM_PROJECT_BRANCH);
     String projectName = StringUtils.defaultIfBlank(wsRequest.param(PARAM_PROJECT_NAME), projectKey);
+    //String[] characteristics = StringUtils.(wsRequest.getParam(PARAM_ANALYSIS_CHARACTERISTICS).or(() -> ""), '=');
 
     try (InputStream report = new BufferedInputStream(wsRequest.mandatoryParamAsPart(PARAM_REPORT_DATA).getInputStream())) {
       CeTask task = reportSubmitter.submit(organizationKey, projectKey, projectBranch, projectName, report);

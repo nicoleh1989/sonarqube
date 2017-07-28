@@ -21,6 +21,9 @@ package org.sonar.server.computation.queue;
 
 import com.google.common.base.Optional;
 import java.io.InputStream;
+import java.util.Collections;
+import java.util.Map;
+
 import javax.annotation.Nullable;
 import org.apache.commons.lang.StringUtils;
 import org.sonar.api.resources.Qualifiers;
@@ -65,11 +68,16 @@ public class ReportSubmitter {
     this.dbClient = dbClient;
   }
 
+  public CeTask submit(String organizationKey, String projectKey, @Nullable String projectBranch, @Nullable String projectName, InputStream reportInput) {
+    return submit(organizationKey, projectKey, projectBranch, projectName, Collections.emptyMap(), reportInput);
+  }
+
   /**
    * @throws NotFoundException if the organization with the specified key does not exist
    * @throws IllegalArgumentException if the organization with the specified key is not the organization of the specified project (when it already exists in DB)
    */
-  public CeTask submit(String organizationKey, String projectKey, @Nullable String projectBranch, @Nullable String projectName, InputStream reportInput) {
+  public CeTask submit(String organizationKey, String projectKey, @Nullable String projectBranch, @Nullable String projectName, Map<String, String> characteristics,
+    InputStream reportInput) {
     try (DbSession dbSession = dbClient.openSession(false)) {
       String effectiveProjectKey = ComponentKeys.createKey(projectKey, projectBranch);
       OrganizationDto organizationDto = getOrganizationDtoOrFail(dbSession, organizationKey);
@@ -77,7 +85,7 @@ public class ReportSubmitter {
       ensureOrganizationIsConsistent(opt, organizationDto);
       ComponentDto project = opt.or(() -> createProject(dbSession, organizationDto, projectKey, projectBranch, projectName));
       checkScanPermission(project);
-      return submitReport(dbSession, reportInput, project);
+      return submitReport(dbSession, reportInput, project, characteristics);
     }
   }
 
@@ -129,7 +137,7 @@ public class ReportSubmitter {
     return componentUpdater.create(dbSession, newProject, userId);
   }
 
-  private CeTask submitReport(DbSession dbSession, InputStream reportInput, ComponentDto project) {
+  private CeTask submitReport(DbSession dbSession, InputStream reportInput, ComponentDto project, Map<String, String> characteristics) {
     // the report file must be saved before submitting the task
     CeTaskSubmit.Builder submit = queue.prepareSubmit();
     dbClient.ceTaskInputDao().insert(dbSession, submit.getUuid(), reportInput);
