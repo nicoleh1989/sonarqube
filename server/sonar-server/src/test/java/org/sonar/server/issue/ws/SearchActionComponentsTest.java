@@ -23,16 +23,20 @@ import java.io.IOException;
 import java.util.List;
 import org.junit.After;
 import org.junit.Before;
-import org.junit.ClassRule;
 import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
+import org.sonar.api.config.internal.MapSettings;
+import org.sonar.api.resources.Languages;
 import org.sonar.api.resources.Qualifiers;
 import org.sonar.api.rule.RuleStatus;
 import org.sonar.api.server.ws.WebService;
 import org.sonar.api.utils.DateUtils;
+import org.sonar.api.utils.Durations;
+import org.sonar.api.utils.System2;
 import org.sonar.db.DbClient;
 import org.sonar.db.DbSession;
+import org.sonar.db.DbTester;
 import org.sonar.db.component.ComponentDto;
 import org.sonar.db.component.ComponentTesting;
 import org.sonar.db.issue.IssueDto;
@@ -40,19 +44,28 @@ import org.sonar.db.issue.IssueTesting;
 import org.sonar.db.organization.OrganizationDao;
 import org.sonar.db.organization.OrganizationDto;
 import org.sonar.db.organization.OrganizationTesting;
-import org.sonar.db.rule.RuleDao;
 import org.sonar.db.rule.RuleDto;
 import org.sonar.db.rule.RuleTesting;
+import org.sonar.server.es.EsTester;
+import org.sonar.server.es.StartupIndexer;
+import org.sonar.server.issue.ActionFinder;
+import org.sonar.server.issue.IssueFieldsSetter;
+import org.sonar.server.issue.IssueQueryFactory;
+import org.sonar.server.issue.TransitionService;
+import org.sonar.server.issue.index.IssueIndex;
+import org.sonar.server.issue.index.IssueIndexDefinition;
 import org.sonar.server.issue.index.IssueIndexer;
-import org.sonar.server.organization.DefaultOrganization;
-import org.sonar.server.organization.DefaultOrganizationProvider;
+import org.sonar.server.issue.index.IssueIteratorFactory;
+import org.sonar.server.issue.workflow.FunctionExecutor;
+import org.sonar.server.issue.workflow.IssueWorkflow;
+import org.sonar.server.permission.index.AuthorizationTypeSupport;
 import org.sonar.server.permission.index.PermissionIndexer;
-import org.sonar.server.tester.ServerTester;
 import org.sonar.server.tester.UserSessionRule;
 import org.sonar.server.view.index.ViewDoc;
+import org.sonar.server.view.index.ViewIndexDefinition;
 import org.sonar.server.view.index.ViewIndexer;
 import org.sonar.server.ws.WsActionTester;
-import org.sonar.server.ws.WsTester;
+import org.sonar.server.ws.WsResponseCommonFormat;
 import org.sonarqube.ws.Issues;
 import org.sonarqube.ws.Issues.SearchWsResponse;
 import org.sonarqube.ws.client.issue.IssuesWsParameters;
@@ -68,31 +81,37 @@ import static org.sonar.db.component.SnapshotTesting.newAnalysis;
 import static org.sonarqube.ws.client.issue.IssuesWsParameters.ACTION_SEARCH;
 import static org.sonarqube.ws.client.issue.IssuesWsParameters.CONTROLLER_ISSUES;
 
-@Ignore("because relies on currently broken SearchServer (through ServerTester)")
-public class SearchActionComponentsMediumTest {
-
-  @ClassRule
-  public static ServerTester tester = new ServerTester().withStartupTasks().withEsIndexes();
+public class SearchActionComponentsTest {
 
   @Rule
-  public UserSessionRule userSessionRule = UserSessionRule.forServerTester(tester);
+  public UserSessionRule userSessionRule = UserSessionRule.standalone();
+  @Rule
+  public DbTester dbTester = DbTester.create();
+  @Rule
+  public EsTester esTester = new EsTester(new IssueIndexDefinition(new MapSettings().asConfig()), new ViewIndexDefinition(new MapSettings().asConfig()));
 
-  private DbClient db;
-  private DbSession session;
-  private WsTester wsTester;
+  private DbClient db = dbTester.getDbClient();
+  private DbSession session = dbTester.getSession();
+  private IssueIndex issueIndex = new IssueIndex(esTester.client(), System2.INSTANCE, userSessionRule, new AuthorizationTypeSupport(userSessionRule));
+  private IssueIndexer issueIndexer = new IssueIndexer(esTester.client(), db, new IssueIteratorFactory(db));
+  private ViewIndexer viewIndexer = new ViewIndexer(db, esTester.client());
+  private IssueQueryFactory issueQueryFactory = new IssueQueryFactory(db, System2.INSTANCE, userSessionRule);
+  private IssueFieldsSetter issueFieldsSetter = new IssueFieldsSetter();
+  private IssueWorkflow issueWorkflow = new IssueWorkflow(new FunctionExecutor(issueFieldsSetter), issueFieldsSetter);
+  private SearchResponseLoader searchResponseLoader = new SearchResponseLoader(userSessionRule, db, new ActionFinder(userSessionRule), new TransitionService(userSessionRule, issueWorkflow));
+  private Languages languages = new Languages();
+  private SearchResponseFormat searchResponseFormat = new SearchResponseFormat(new Durations(), new WsResponseCommonFormat(languages), languages, new AvatarResolverImpl());
+  private WsActionTester wsTester = new WsActionTester(new SearchAction(userSessionRule, issueIndex, issueQueryFactory, searchResponseLoader, searchResponseFormat));
   private OrganizationDto defaultOrganization;
   private OrganizationDto otherOrganization1;
   private OrganizationDto otherOrganization2;
+  private StartupIndexer permissionIndexer = new PermissionIndexer(db, esTester.client(), issueIndexer);
 
   @Before
   public void setUp() {
-    tester.clearDbAndIndexes();
-    db = tester.get(DbClient.class);
-    wsTester = tester.get(WsTester.class);
     session = db.openSession(false);
     OrganizationDao organizationDao = db.organizationDao();
-    DefaultOrganization defaultOrganization = tester.get(DefaultOrganizationProvider.class).get();
-    this.defaultOrganization = organizationDao.selectByUuid(session, defaultOrganization.getUuid()).get();
+    this.defaultOrganization = dbTester.getDefaultOrganization();
     this.otherOrganization1 = OrganizationTesting.newOrganizationDto().setKey("my-org-1");
     this.otherOrganization2 = OrganizationTesting.newOrganizationDto().setKey("my-org-2");
     organizationDao.insert(session, this.otherOrganization1, false);
@@ -131,8 +150,9 @@ public class SearchActionComponentsMediumTest {
     indexIssues();
     indexPermissions();
 
-    WsTester.Result result = wsTester.newGetRequest(CONTROLLER_ISSUES, ACTION_SEARCH).execute();
-    result.assertJson(this.getClass(), "issues_on_different_projects.json");
+    wsTester.newGetRequest(CONTROLLER_ISSUES, ACTION_SEARCH)
+      .execute()
+      .assertJson(this.getClass(), "issues_on_different_projects.json");
   }
 
   @Test
@@ -148,8 +168,7 @@ public class SearchActionComponentsMediumTest {
     indexIssues();
     indexPermissions();
 
-    WsActionTester actionTester = new WsActionTester(tester.get(SearchAction.class));
-    SearchWsResponse searchResponse = actionTester.newRequest().executeProtobuf(SearchWsResponse.class);
+    SearchWsResponse searchResponse = wsTester.newRequest().executeProtobuf(SearchWsResponse.class);
     assertThat(searchResponse.getIssuesCount()).isEqualTo(2);
 
     for (Issues.Issue issue : searchResponse.getIssuesList()) {
@@ -471,11 +490,11 @@ public class SearchActionComponentsMediumTest {
     indexPermissions();
 
     userSessionRule.logIn("john");
-    WsTester.Result result = wsTester.newGetRequest(CONTROLLER_ISSUES, ACTION_SEARCH)
+    wsTester.newGetRequest(CONTROLLER_ISSUES, ACTION_SEARCH)
       .setParam("resolved", "false")
       .setParam(WebService.Param.FACETS, "directories")
-      .execute();
-    result.assertJson(this.getClass(), "display_directory_facet.json");
+      .execute()
+      .assertJson(this.getClass(), "display_directory_facet.json");
   }
 
   @Test
@@ -569,13 +588,12 @@ public class SearchActionComponentsMediumTest {
       .setName("Rule name")
       .setDescription("Rule desc")
       .setStatus(RuleStatus.READY);
-    tester.get(RuleDao.class).insert(session, rule.getDefinition());
+    dbTester.rules().insert(rule.getDefinition());
     session.commit();
     return rule;
   }
 
   private void indexPermissions() {
-    PermissionIndexer permissionIndexer = tester.get(PermissionIndexer.class);
     permissionIndexer.indexOnStartup(permissionIndexer.getIndexTypes());
   }
 
@@ -593,11 +611,10 @@ public class SearchActionComponentsMediumTest {
   }
 
   private void indexIssues() {
-    IssueIndexer r = tester.get(IssueIndexer.class);
-    r.indexOnStartup(r.getIndexTypes());
+    issueIndexer.indexOnStartup(issueIndexer.getIndexTypes());
   }
 
   private void indexView(String viewUuid, List<String> projects) {
-    tester.get(ViewIndexer.class).index(new ViewDoc().setUuid(viewUuid).setProjects(projects));
+    viewIndexer.index(new ViewDoc().setUuid(viewUuid).setProjects(projects));
   }
 }
