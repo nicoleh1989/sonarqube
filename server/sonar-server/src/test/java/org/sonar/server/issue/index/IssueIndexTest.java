@@ -19,6 +19,7 @@
  */
 package org.sonar.server.issue.index;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterators;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -62,6 +63,8 @@ import org.sonar.server.view.index.ViewIndexer;
 
 import static com.google.common.collect.ImmutableSortedSet.of;
 import static java.util.Arrays.asList;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.singletonList;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.entry;
 import static org.mockito.Mockito.mock;
@@ -1157,6 +1160,27 @@ public class IssueIndexTest {
     // conflict
     query = IssueQuery.builder().organizationUuid(org1.getUuid()).projectUuids(asList(projectInOrg2.uuid()));
     assertThatSearchReturnsEmpty(query);
+  }
+
+  @Test
+  public void countTags() {
+    OrganizationDto org = newOrganizationDto();
+    ComponentDto project = ComponentTesting.newPrivateProjectDto(org);
+    indexIssues(
+      newDoc("issue1", project).setTags(ImmutableSet.of("convention", "java8", "bug")),
+      newDoc("issue2", project).setTags(ImmutableSet.of("convention", "bug")),
+      newDoc("issue3", project).setTags(emptyList()),
+      newDoc("issue4", project).setTags(ImmutableSet.of("convention", "java8", "bug")).setResolution(Issue.RESOLUTION_FIXED),
+      newDoc("issue5", project).setTags(ImmutableSet.of("convention"))
+    );
+
+    assertThat(underTest.countTags(projectQuery(project.uuid()), 5)).containsOnly(entry("convention", 3L), entry("bug", 2L), entry("java8", 1L));
+    assertThat(underTest.countTags(projectQuery(project.uuid()), 2)).contains(entry("convention", 3L), entry("bug", 2L)).doesNotContainEntry("java8", 1L);
+    assertThat(underTest.countTags(projectQuery("other"), 10)).isEmpty();
+  }
+
+  private IssueQuery projectQuery(String projectUuid) {
+    return IssueQuery.builder().projectUuids(singletonList(projectUuid)).resolved(false).build();
   }
 
   private void verifyOrganizationFilter(String organizationUuid, String... expectedIssueKeys) {
